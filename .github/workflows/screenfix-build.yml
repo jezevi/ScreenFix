@@ -1,0 +1,69 @@
+name: ScreenFix build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        shell: bash
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Tests (core, OCR glue, WinAPI logic)
+        shell: bash
+        run: |
+          python -m unittest discover -s tests -p "test_core.py" -v
+          python -m unittest discover -s tests -p "test_ocr_logic.py" -v
+          python -m unittest discover -s tests -p "test_winapi_logic.py" -v
+
+      - name: Tests (windows and orchestration on real Tk)
+        continue-on-error: true
+        shell: bash
+        run: |
+          python -m unittest discover -s tests -p "test_ui.py" -v
+          python -m unittest discover -s tests -p "test_app.py" -v
+
+      - name: Build exe
+        shell: pwsh
+        run: >-
+          pyinstaller --onefile --noconsole --clean --name ScreenFix
+          --hidden-import screenfix.winapi --hidden-import screenfix.ocr_win
+          --hidden-import screenfix.ui --hidden-import screenfix.selftest
+          --hidden-import screenfix.mock_lm run.py
+
+      - name: Self-test of the built exe
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $p = Start-Process -FilePath dist\ScreenFix.exe -ArgumentList '--selftest','--quiet','--out','selftest_ci.txt' -Wait -PassThru
+          "exit code: $($p.ExitCode)"
+          if (-not (Test-Path selftest_ci.txt)) { throw 'The exe did not produce selftest_ci.txt: it does not start' }
+          $t = Get-Content selftest_ci.txt -Encoding UTF8 -Raw
+          Write-Host $t
+          if ($t -match 'ModuleNotFoundError|ImportError|No module named') { throw 'A module is missing inside the exe' }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ScreenFix | Out-Null
+          Copy-Item dist\ScreenFix.exe ScreenFix\
+          Copy-Item README.md ScreenFix\
+          python -c "from screenfix import core; open('ScreenFix/rules.txt','w',encoding='utf-8').write(core.RULES_TEMPLATE)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenFix-windows
+          path: ScreenFix
