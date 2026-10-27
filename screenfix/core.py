@@ -320,6 +320,11 @@ def _open(cfg: Dict[str, object], method: str, path: str, payload: Optional[dict
         reason = getattr(e, "reason", e)
         if isinstance(reason, TimeoutError) or isinstance(e, TimeoutError):
             raise ScreenFixError(f"LM Studio не ответил за {cfg['timeout_s']} с. Модель может быть перегружена: попробуйте ещё раз.")
+        if isinstance(reason, (ConnectionResetError, ConnectionAbortedError)):  # включает RemoteDisconnected
+            raise ScreenFixError(
+                "LM Studio оборвал соединение, не дав ответа. Возможно, модель выгрузилась или не хватило памяти видеокарты. "
+                "Проверьте LM Studio и повторите."
+            )
         raise ScreenFixError(
             f"Не удалось связаться с LM Studio ({cfg['base_url']}). Проверьте: LM Studio запущен, на вкладке "
             f"Developer (Model Server) сервер включён, модель загружена. Подробности: {reason}"

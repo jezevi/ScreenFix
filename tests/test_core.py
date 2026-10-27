@@ -4,6 +4,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -227,29 +228,78 @@ class AgainstMockServer(unittest.TestCase):
             core.run_fix(self.cfg, "", "текст длиннее")
         self.assertIn("замолчал", str(cm.exception))
 
-    def test_connection_dropped_mid_answer(self):
-        # «Сервер» присылает заголовки и половину куска, потом рвёт соединение.
+    def _raw_server(self, respond, rst=False):
+        """Сервер на сыром сокете: читает запрос ЦЕЛИКОМ (иначе Windows при закрытии шлёт RST и теряет ответ), затем respond(conn)."""
+        import struct
+
         srv = socket.socket()
         srv.bind(("127.0.0.1", 0))
         srv.listen(1)
-        port = srv.getsockname()[1]
 
         def serve():
-            c, _ = srv.accept()
-            c.recv(65536)
-            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n10\r\ndata: {\"cho")
-            c.close()
+            try:
+                c, _ = srv.accept()
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                head, _, body = data.partition(b"\r\n\r\n")
+                length = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":")[1])
+                while len(body) < length:
+                    body += c.recv(65536)
+                respond(c)
+                if rst:  # закрытие с RST, как при падении процесса
+                    c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                else:
+                    c.shutdown(socket.SHUT_WR)
+                    time.sleep(0.2)
+                c.close()
+            except OSError:
+                pass
 
-        t = threading.Thread(target=serve, daemon=True)
-        t.start()
-        self.cfg["base_url"] = f"http://127.0.0.1:{port}/v1"
+        threading.Thread(target=serve, daemon=True).start()
+        self.cfg["base_url"] = f"http://127.0.0.1:{srv.getsockname()[1]}/v1"
         self.cfg["model"] = "m"
+        return srv
+
+    def test_connection_dropped_mid_answer(self):
+        # заголовки и половина куска, затем обрыв
+        srv = self._raw_server(
+            lambda c: c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n10\r\ndata: {\"cho")
+        )
         try:
             with self.assertRaises(core.ScreenFixError) as cm:
                 core.run_fix(self.cfg, "", "текст")
         finally:
             srv.close()
-        self.assertIn("оборвалось", str(cm.exception))
+        self.assertIn("посреди ответа", str(cm.exception))
+
+    def test_connection_closed_before_any_answer(self):
+        srv = self._raw_server(lambda c: None)  # прочитал запрос и закрыл, ничего не ответив
+        try:
+            with self.assertRaises(core.ScreenFixError) as cm:
+                core.run_fix(self.cfg, "", "текст")
+        finally:
+            srv.close()
+        self.assertIn("не дав ответа", str(cm.exception))
+
+    def test_connection_reset_is_a_readable_error_in_any_phase(self):
+        # RST (как при падении LM Studio): на Windows он приходит ещё до заголовков, на Linux — позже; сообщение должно быть понятным в обоих случаях
+        srv = self._raw_server(
+            lambda c: c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n10\r\ndata: {\"cho"),
+            rst=True,
+        )
+        try:
+            with self.assertRaises(core.ScreenFixError) as cm:
+                core.run_fix(self.cfg, "", "текст")
+        finally:
+            srv.close()
+        self.assertIn("оборвал", str(cm.exception))
 
     def test_cancel_stops_stream(self):
         self.mock.delay = 0.05

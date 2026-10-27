@@ -48,6 +48,12 @@ class MockLM:
             def log_message(self, *a, **k):  # тишина в тестах
                 pass
 
+            def handle(self):
+                try:
+                    super().handle()
+                except ConnectionError:
+                    pass  # клиент отменил запрос или оборвал соединение (в Windows это ConnectionAbortedError)
+
             def _json(self, code: int, obj: dict) -> None:
                 body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
                 self.send_response(code)
